@@ -13,12 +13,20 @@ class RobustCrossEntropyLoss(nn.CrossEntropyLoss):
         if target.ndim == input.ndim:
             assert target.shape[1] == 1
             target = target[:, 0]
+            ce_out = super().forward(input, target.long())
             if pix_weights is not None and self.reduction == "none":
                 assert pix_weights.shape[1] == 1
-                pix_weCrossEntropyLossights = pix_weights[:, 0]
-                return torch.mul(super().forward(input, target.long()), pix_weights)
-            
-        return super().forward(input, target.long())
+                pix_weights = pix_weights[:, 0]
+                return torch.mean(torch.mul(ce_out, pix_weights))
+            return ce_out
+        
+        else:
+            ce_out = super().forward(input, target.long())
+            if pix_weights is not None and self.reduction == "none":
+                assert pix_weights.shape[1] == 1
+                pix_weights = pix_weights[:, 0]
+                return torch.mean(torch.mul(ce_out, pix_weights))
+            return ce_out
 
 
 class TopKLoss(RobustCrossEntropyLoss):

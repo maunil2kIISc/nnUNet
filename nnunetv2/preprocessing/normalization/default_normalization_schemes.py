@@ -95,4 +95,15 @@ class RGBTo01Normalization(ImageNormalization):
         image = image.astype(self.target_dtype, copy=False)
         image /= 255.
         return image
+    
+class RescaleTo01NormalizationDWI(ImageNormalization):
+    leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true = False
 
+    def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
+        p1 = np.percentile(image, 1)
+        p99 = np.percentile(image, 99)
+        image = np.clip(image, p1, p99)
+        image = image.astype(self.target_dtype, copy=False)
+        image -= image.min()
+        image /= np.clip(image.max(), a_min=1e-8, a_max=None)
+        return image
