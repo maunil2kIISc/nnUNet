@@ -28,9 +28,10 @@ class DC_and_CE_loss(nn.Module):
         self.ce = RobustCrossEntropyLoss(**ce_kwargs)
         self.dc = dice_class(apply_nonlin=softmax_helper_dim1, **soft_dice_kwargs)
 
-    def forward(self, net_output: torch.Tensor, target: torch.Tensor):
+    def forward(self, net_output: torch.Tensor, target: torch.Tensor, pix_weights: torch.Tensor = None):
         """
         target must be b, c, x, y(, z) with c=1
+        pix_weights must be b, c, x, y(, z) with c=1 if not None
         :param net_output:
         :param target:
         :return:
@@ -49,7 +50,7 @@ class DC_and_CE_loss(nn.Module):
 
         dc_loss = self.dc(net_output, target_dice, loss_mask=mask) \
             if self.weight_dice != 0 else 0
-        ce_loss = self.ce(net_output, target[:, 0]) \
+        ce_loss = self.ce(net_output, target[:, 0], pix_weights) \
             if self.weight_ce != 0 and (self.ignore_label is None or num_fg > 0) else 0
 
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
@@ -80,7 +81,7 @@ class DC_and_BCE_loss(nn.Module):
         self.ce = nn.BCEWithLogitsLoss(**bce_kwargs)
         self.dc = dice_class(apply_nonlin=torch.sigmoid, **soft_dice_kwargs)
 
-    def forward(self, net_output: torch.Tensor, target: torch.Tensor):
+    def forward(self, net_output: torch.Tensor, target: torch.Tensor, pix_weights: torch.Tensor = None):
         if self.use_ignore_label:
             # target is one hot encoded here. invert it so that it is True wherever we can compute the loss
             if target.dtype == torch.bool:
