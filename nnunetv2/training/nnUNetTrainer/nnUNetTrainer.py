@@ -1381,3 +1381,9 @@ class nnUNetTrainer(object):
             self.on_epoch_end()
 
         self.on_train_end()
+
+class nnUNetTrainer_minor_tweaks(nnUNetTrainer):
+    def __init__(self, plans, configuration, fold, dataset_json, device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.save_every = 10
+        self.num_epochs = 500
