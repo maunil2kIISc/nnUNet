@@ -1394,6 +1394,7 @@ class nnUNetTrainer_minor_tweaks(nnUNetTrainer):
         self.num_epochs = 500
 
 class nnUNetPPTrainer(nnUNetTrainer):
+
     def __init__(self, plans, configuration, fold, dataset_json, device = torch.device('cuda')):
         super().__init__(plans, configuration, fold, dataset_json, device)
         self.save_every = 10
@@ -1506,3 +1507,59 @@ class nnAttnUnetTrainer(nnUNetTrainer):
         pass
 
     # CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 003 3d_fullres 0 -tr nnAttnUnetTrainer --npz --c
+
+class SwinUneTRTrainer(nnUNetTrainer):
+    def __init__(self, plans, configuration, fold, dataset_json, device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.save_every = 10
+        self.num_epochs = 500
+        self.enable_deep_supervision = False
+
+    @staticmethod
+    def build_network_architecture(num_input_channels: int, enable_deep_supervision: bool = True) -> nn.Module:
+        return BasicUNetPlusPlus(
+                spatial_dims=3,
+                in_channels=num_input_channels,
+                deep_supervision=enable_deep_supervision,
+                features=[32, 64, 128, 256, 512, 512],
+                out_channels=2
+            )
+    
+    def initialize(self):
+        if not self.was_initialized:
+            ## DDP batch size and oversampling can differ between workers and needs adaptation
+            # we need to change the batch size in DDP because we don't use any of those distributed samplers
+            self._set_batch_size_and_oversample()
+
+            self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
+                                                                   self.dataset_json)
+
+            self.network = self.build_network_architecture(2, False).to(self.device)
+            # print the number of trainable parameters
+            num_params = sum(p.numel() for p in self.network.parameters() if p.requires_grad)
+            self.print_to_log_file(f"Number of trainable parameters: {num_params:,}")
+            # compile network for free speedup
+            if self._do_i_compile():
+                self.print_to_log_file('Using torch.compile...')
+                self.network = torch.compile(self.network)
+
+            self.optimizer, self.lr_scheduler = self.configure_optimizers()
+            # if ddp, wrap in DDP wrapper
+            if self.is_ddp:
+                self.network = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
+                self.network = DDP(self.network, device_ids=[self.local_rank])
+
+            self.loss = self._build_loss()
+
+            self.dataset_class = infer_dataset_class(self.preprocessed_dataset_folder)
+
+            # torch 2.2.2 crashes upon compiling CE loss
+            # if self._do_i_compile():
+            #     self.loss = torch.compile(self.loss)
+            self.was_initialized = True
+        else:
+            raise RuntimeError("You have called self.initialize even though the trainer was already initialized. "
+                               "That should not happen.")
+        
+    def set_deep_supervision_enabled(self, enabled: bool):
+        pass
