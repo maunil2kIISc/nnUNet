@@ -42,7 +42,7 @@ from torch._dynamo import OptimizedModule
 from torch.cuda import device_count
 from torch import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from nnunetv2.model_sharing.Unet_plus_plus import BasicUNetPlusPlus
+from nnunetv2.model_sharing.basic_models import BasicUNetPlusPlus, ModelAttnUnet
 
 from nnunetv2.configuration import ANISO_THRESHOLD, default_num_processes
 from nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder
@@ -1402,25 +1402,6 @@ class nnUNetPPTrainer(nnUNetTrainer):
 
     @staticmethod
     def build_network_architecture(num_input_channels: int, enable_deep_supervision: bool = True) -> nn.Module:
-        """
-        This is where you build the architecture according to the plans. There is no obligation to use
-        get_network_from_plans, this is just a utility we use for the nnU-Net default architectures. You can do what
-        you want. Even ignore the plans and just return something static (as long as it can process the requested
-        patch size)
-        but don't bug us with your bugs arising from fiddling with this :-P
-        This is the function that is called in inference as well! This is needed so that all network architecture
-        variants can be loaded at inference time (inference will use the same nnUNetTrainer that was used for
-        training, so if you change the network architecture during training by deriving a new trainer class then
-        inference will know about it).
-
-        If you need to know how many segmentation outputs your custom architecture needs to have, use the following snippet:
-        > label_manager = plans_manager.get_label_manager(dataset_json)
-        > label_manager.num_segmentation_heads
-        (why so complicated? -> We can have either classical training (classes) or regions. If we have regions,
-        the number of outputs is != the number of classes. Also there is the ignore label for which no output
-        should be generated. label_manager takes care of all that for you.)
-
-        """
         return BasicUNetPlusPlus(
                 spatial_dims=3,
                 in_channels=num_input_channels,
@@ -1437,15 +1418,6 @@ class nnUNetPPTrainer(nnUNetTrainer):
 
             self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
                                                                    self.dataset_json)
-
-            # self.network = self.build_network_architecture(
-            #     self.configuration_manager.network_arch_class_name,
-            #     self.configuration_manager.network_arch_init_kwargs,
-            #     self.configuration_manager.network_arch_init_kwargs_req_import,
-            #     self.num_input_channels,
-            #     self.label_manager.num_segmentation_heads,
-            #     self.enable_deep_supervision
-            # ).to(self.device)
 
             self.network = self.build_network_architecture(2, False).to(self.device)
             # print the number of trainable parameters
@@ -1466,9 +1438,6 @@ class nnUNetPPTrainer(nnUNetTrainer):
 
             self.dataset_class = infer_dataset_class(self.preprocessed_dataset_folder)
 
-            # torch 2.2.2 crashes upon compiling CE loss
-            # if self._do_i_compile():
-            #     self.loss = torch.compile(self.loss)
             self.was_initialized = True
         else:
             raise RuntimeError("You have called self.initialize even though the trainer was already initialized. "
@@ -1476,3 +1445,64 @@ class nnUNetPPTrainer(nnUNetTrainer):
         
     def set_deep_supervision_enabled(self, enabled: bool):
         pass
+
+
+class nnAttnUnetTrainer(nnUNetTrainer):
+    def __init__(self, plans, configuration, fold, dataset_json, device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.save_every = 10
+        self.num_epochs = 500
+        self.enable_deep_supervision = False
+
+    @staticmethod
+    def build_network_architecture(
+        architecture_class_name: str = None,
+        arch_init_kwargs: dict = None,
+        arch_init_kwargs_req_import: Union[List[str], Tuple[str, ...]] = None,
+        num_input_channels: int = None,
+        num_output_channels: int = None,
+        enable_deep_supervision: bool = True
+    ) -> nn.Module:
+        
+        return ModelAttnUnet(
+            spatial_dims=3,
+            in_channels=num_input_channels,
+            out_channels=num_output_channels,
+            channels=[32, 64, 128, 256, 320, 320, 320],
+            strides=[(1, 2, 2), (1, 2, 2), (1, 2, 2), (1, 2, 2), (1, 2, 2), (1, 2, 2), (1, 2, 2)],
+            dropout=0.2
+        )
+    
+    def initialize(self):
+        if not self.was_initialized:
+            self._set_batch_size_and_oversample()
+            self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager, self.dataset_json)
+            self.network = self.build_network_architecture(num_input_channels=self.num_input_channels, num_output_channels=self.label_manager.num_segmentation_heads).to(self.device)
+            self.print_to_log_file(f"Num of output channels: {self.label_manager.num_segmentation_heads}")
+            num_params = sum(p.numel() for p in self.network.parameters() if p.requires_grad)
+            self.print_to_log_file(f"Number of trainable parameters in Attention Unet: {num_params:,}")
+
+            # compile network for free speedup
+            if self._do_i_compile():
+                self.print_to_log_file('Using torch.compile...')
+                self.network = torch.compile(self.network)
+
+            self.optimizer, self.lr_scheduler = self.configure_optimizers()
+            # if ddp, wrap in DDP wrapper
+            if self.is_ddp:
+                self.network = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
+                self.network = DDP(self.network, device_ids=[self.local_rank])
+
+            self.loss = self._build_loss()
+
+            self.dataset_class = infer_dataset_class(self.preprocessed_dataset_folder)
+            self.was_initialized = True
+
+        else:
+            raise RuntimeError("You have called self.initialize even though the trainer was already initialized. "
+                               "That should not happen.")
+        
+    def set_deep_supervision_enabled(self, enabled: bool):
+        pass
+
+    # CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 003 3d_fullres 0 -tr nnAttnUnetTrainer --npz --c
